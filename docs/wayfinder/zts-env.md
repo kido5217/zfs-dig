@@ -27,7 +27,8 @@ ZTS itself.
    Python test-runner with `PATH=$STF_PATH`
    (`scripts/zfs-tests.sh:413-475`, `:915-926`). Anything a helper execs
    must be on that list or the link is missing at runtime (missing entries
-   are reported as `Missing util(s)` — `scripts/zfs-tests.sh:879`).
+   are reported as `Missing util(s)` — `scripts/zfs-tests.sh:879`); tools
+   execed by absolute path bypass the list (§1.4).
 4. It loads the ZFS module stack via `sudo scripts/zfs.sh`
    (`scripts/zfs-tests.sh:744-748`), creates vdev backing (sparse files +
    loopback devices) unless `$DISKS` is set (`:786-830`), then runs
@@ -46,10 +47,11 @@ ZTS itself.
 
 ## 1. Binary inventory the helpers may exec
 
-The authoritative list is the `constrain_path` allow-list in
-`tests/zfs-tests/include/commands.cfg` — 93 OS-common, 40 Linux-only, 17 ZFS
-userland binaries, 68 test-suite command binaries (built from
-`tests/zfs-tests/cmd/`) plus `setlease`.
+The authoritative PATH-based list is the `constrain_path` allow-list in
+`tests/zfs-tests/include/commands.cfg` — 95 OS-common, 39 Linux-only, 17 ZFS
+userland binaries, 69 test-suite command binaries (built from
+`tests/zfs-tests/cmd/`) plus `setlease`. Binaries execed by *absolute path*
+bypass this list entirely; they are enumerated in §1.4.
 
 ### 1.1 OS-common (commands.cfg:11-105)
 
@@ -66,7 +68,7 @@ Non-obvious ones (with the consumer that proves the requirement):
 | binary | why (file:line) |
 |---|---|
 | `fio` | io group (`tests/functional/io/*.ksh`), l2arc compression tests; CI installs it |
-| `ksh` | every test script is `#!/bin/ksh -p` (2050 files under `tests/functional/`) |
+| `ksh` | every test script is `#!/bin/ksh` (2039 files under `tests/functional/`, 2054 suite-wide; 119 of them omit `-p`) |
 | `jq` | JSON output tests (`cli_root/json`, `zpool_get`) |
 | `net` | Samba client: `is_shared` checks `net usershare list` (`include/libtest.shlib:1361`), `zfs_unshare_006_pos.ksh` |
 | `pamtester` | `tests/functional/pam/*` (setup.ksh aborts if absent) |
@@ -74,11 +76,11 @@ Non-obvious ones (with the consumer that proves the requirement):
 | `swapoff/swapon` | `zvol_swap` (`tests/functional/zvol/zvol_swap/zvol_swap.cfg` calls `swapon -s`; cleanup re-enables via `swapon -a`) |
 | `openssl` | crypto tests |
 | `getfacl/setfacl` | POSIX ACL tests (acl on/off groups) |
-| `iostat/vmstat/mpstat` | scrub/resilver monitoring helpers (`expect_iostat`, `delay_iostat`, used ~21/17×) |
-| `pax` | archive tests (cp_files/mv_files use `pax` options from default.cfg.in:166-170) |
+| `iostat/vmstat/mpstat` | perf-sampling helpers `expect_iostat`/`delay_iostat` of the `zpool_iostat` group (used ~21/17×) |
+| `pax` | on the allow-list but unused on Linux: its only consumer, `xattr_011_pos.ksh`, runs it solely under `is_illumos` (`default.cfg.in:166-170` are tar options, not pax) |
 | `scp/ssh/rsync/ping` | NFS/remote helpers (`setup_nfs_server`, sanity of NFS env) |
 | `script` | `cli_root/zfs_upgrade/setup.ksh` (pseudo-tty) |
-| `mknod/mkfifo/hostid` | device nodes, `/etc/hostid` tests (`cli_root/zpool`, `zgenhostid`) |
+| `mknod/mkfifo/hostid` | device nodes, `/etc/hostid` tests (`cli_root/zpool`, `zgenhostid`; on nixpkgs `hostid` is a coreutils applet, not util-linux) |
 | `logger` | syslog event tests |
 | `getent` | user/group checks in helpers |
 | `dmesg` | failure callback (`callbacks/zfs_dmesg.ksh` runs `sudo dmesg -c --time-format=iso`) |
@@ -110,10 +112,11 @@ Proven consumers (representative):
 - `useradd/groupadd/usermod/userdel/groupdel/groupmod` — every test that
   creates users/groups (`libtest.shlib:2398-2489`): delegate, userquota,
   projectquota, zoned_uid, pam, cli_user.
-- `exportfs` (+ `showmount`, `pgrep mountd`) — NFS sharing tests
-  (`libtest.shlib:1222,1458-1514`); tests expect the NFS server already
-  running and `/etc/exports.d/zfs.exports` to be the share file
-  (`libtest.shlib:1312`).
+- `exportfs` — NFS sharing tests: the Linux path uses `exportfs -r` only
+  (`libtest.shlib:1458-1514`); `showmount`/`pgrep mountd` at
+  `libtest.shlib:1222` sit in `is_shared_freebsd`. Tests expect the NFS
+  server already running and `/etc/exports.d/zfs.exports` to be the share
+  file (`libtest.shlib:1312`).
 - `cryptsetup` — `tests/functional/luks/luks_sanity.ksh:52-55` (dm-crypt
   on a file vdev, expects `/dev/mapper/luksdev`).
 - `unshare` (`-U` user namespaces) — `tests/functional/user_namespace/user_namespace_001.ksh:41`
@@ -146,6 +149,22 @@ Also hard-wired outside the allow-list:
 - Python modules: `libzfs_core` + `nvlist` (`ctypes`) for
   `tests/functional/pyzfs/pyzfs_unittest.ksh.in:40-43` (built by the tree,
   needs the configured `@PYTHON@` and `ldd`, line 21).
+
+### 1.4 Absolute-path execs that bypass the allow-list
+
+These break even when every allow-listed tool is on PATH:
+
+- `/usr/sbin/wipefs` — `tests/functional/fault/auto_replace_001_pos.ksh:98`,
+  `auto_replace_002_pos.ksh:131`.
+- `/usr/sbin/nologin` — `tests/functional/zoned_uid/setup.ksh:50`.
+- `/bin/true` — execed unconditionally between phases by the suite-built
+  `xattrtest` (`tests/zfs-tests/cmd/xattrtest.c:86,285-298`).
+- Inside the runner: `/usr/bin/awk` and `/usr/bin/strace` by absolute path,
+  and `top`/`killall` by name on the `-O` timeout-debug path while `PATH` is
+  the constrained `STF_PATH` (`tests/test-runner/bin/test-runner.py.in:205-227`,
+  `:232`). Neither `top` nor `killall` is on the allow-list, so a timeout in
+  CI-equivalent `-vKO` mode fails the debug block silently unless the farm
+  populated the real `/usr/bin` and the VM image carries strace/top/killall.
 
 ## 2. OS/kernel interface requirements
 
@@ -239,12 +258,12 @@ availability.
 | # | ZTS expectation | NixOS reality | severity / mitigation |
 |---|---|---|---|
 | 4.1 | `constrain_path` scans only `/usr/local/bin /usr/local/sbin /usr/bin /usr/sbin /bin /sbin` (+ `$LIBEXEC_DIR`) (`zfs-tests.sh:419-420`) to build the allow-list | stock NixOS: `/bin` holds only `sh`, `/usr/bin` only `env`, others absent → **every** allow-listed system tool is reported missing; tests would run with an empty PATH | **blocker.** Mitigation: symlink-farm (e.g. systemd tmpfiles/activation) that populates `/usr/bin`+`/sbin` from `systemPackages`, or run ZTS inside an FHS container (`nixos-container`, `buildFHSUserEnv` variant with the §1 list) on the NixOS kernel |
-| 4.2 | every test script is `#!/bin/ksh` — the kernel resolves shebangs by absolute path, PATH is irrelevant (`tests/functional/**` 2050 hits); FreeBSD explicitly symlinks `/bin/ksh` but the Linux path does not (`zfs-tests.sh:734-737`) | no `/bin/ksh` in stock NixOS (ksh is at `/run/current-system/sw/bin/ksh`) | **blocker.** One-time `ln -s` of ksh into `/bin` (tmpfiles rule) after 4.1 anyway |
+| 4.2 | every test script is `#!/bin/ksh` — the kernel resolves shebangs by absolute path, PATH is irrelevant (`tests/functional/**` 2039 hits, 2054 suite-wide); FreeBSD explicitly symlinks `/bin/ksh` but the Linux path does not (`zfs-tests.sh:734-737`) | no `/bin/ksh` in stock NixOS (ksh is at `/run/current-system/sw/bin/ksh`) | **blocker.** One-time `ln -s` of ksh **and `true`** (§1.4) into `/bin` (tmpfiles rule) after 4.1 anyway |
 | 4.3 | hard-coded `/sbin/fsck.ext4`, `/sbin/mkfs.ext4` (`zfs-tests.sh:468-469`) | e2fsprogs provides them but at `…/bin` (verified: nixpkgs e2fsprogs output has bin/+sbin/ trees, binaries in `bin`); `/sbin` absent | **high.** Same farm as 4.1; only overridable by patching |
 | 4.4 | `/sbin/losetup`, `/sbin/dmsetup`, `/sbin/modprobe` (`zfs.sh:20-21`) defaults | `/sbin` missing; binaries in sw/bin | **medium:** `LOSETUP`/`DMSETUP`/`LDMOD` env overrides exist (`zfs-tests.sh:56-57`) |
 | 4.5 | `xxh128sum` binary name (`commands.cfg:105`, `libtest.shlib:3656-3660`) | nixpkgs `xxhash` ships only `xxhsum` (verified `$out/bin`: single entry); Debian/RHEL ship the `xxh128sum` alias | **medium.** Add a wrapper symlink; without it raidz/history/gang/fault tests fail |
 | 4.6 | udev rules with `PROGRAM=="@udevdir@/zvol_id"` and `RUN+="/sbin/modprobe zfs"` (`udev/rules.d/*.in`) | NixOS installs the zfs rules (probe host has `/etc/udev/rules.d/60-zvol.rules`) — zvol symlinks work today; systemd-udevd is running. But `90-zfs.rules` modprobe path and rule helper paths need NixOS's store paths (done by the nixpkgs zfs package) | **low** when using the distro-packaged rules; **high** when rules from `make install` are dropped unpatched |
-| 4.7 | NFS server + `exportfs`/`showmount` + `/etc/exports.d/zfs.exports`; samba with usershares enabled (`libtest.shlib:1222,1312,1361`; `qemu-6-tests` enables both services) | available (nfs-utils 3.1.1, samba 4.23.10 verified); `services.nfs-server.enable` + `services.samba` config needed; `/etc` is generated — tests write runtime files there (`/etc/pam.d`, vdev_id.conf), which works because NixOS `/etc` is writable | **medium** (config work, not availability) |
+| 4.7 | NFS server + `exportfs` + `/etc/exports.d/zfs.exports`; samba with usershares enabled (`libtest.shlib:1312,1361`, `setup_nfs_server` at `:1491-1514`; services enabled by `qemu-3-deps-vm.sh:276-326`) | available (nfs-utils 2.9.1, samba 4.23.10 verified on release-26.05); `services.nfs-server.enable` + `services.samba` config needed; `/etc` is generated — tests write runtime files there (`/etc/pam.d`, vdev_id.conf), which works because NixOS `/etc` is writable | **medium** (config work, not availability) |
 | 4.8 | `/boot/config-$(uname -r)` readable for io_uring checks (`io/io_uring.ksh:34`, `direct/dio_async_fio_ioengines.ksh`) | NixOS has no `/boot/config-*` (config in the store; this host exposed `zcat /proc/config.gz` only) → those tests *skip* (`log_unsupported`) | **low** — skip, not fail; can be satisfied with an /etc-style symlink |
 | 4.9 | `sudo -E` preserving the constrained PATH (`test-runner.py.in:302-311`); non-root passwordless sudoer | NixOS sudo is package-managed; env/secure_path handling depends on the generated sudoers — must be validated | **medium** — validate on target; add `SETENV`/`env_keep` |
 | 4.10 | `kmemleak` (`-m`) | nixpkgs kernels: `# CONFIG_DEBUG_KMEMLEAK is not set` (verified via /proc/config.gz) | **low** — optional feature unavailable |
@@ -252,7 +271,9 @@ availability.
 | 4.12 | FHS install layout: `$datadir/zfs` (`test-runner.py.in:44`), zed dirs under `/etc/zfs` (default.cfg.in:28-31), `/usr/libexec/zfs`, `--prefix=/usr` in CI | `make install` into a live `/usr` conflicts with NixOS (usr=store tree; only `/usr/{bin,local}` scratch dirs exist); the sane route is packaging (nixpkgs zfs already builds the same sources; module matches the NixOS kernel) | **medium** — packaging decision, not an OS gap |
 | 4.13 | ksh quality: CI builds ksh 1.0 from source on Alpine because packaged ksh was unsuitable (`qemu-3-deps-vm.sh:47-54`); nixpkgs `ksh` is ast/att 2020.0.0 (ksh93u+ lineage) | old-ish ksh93; ZTS targets modern ksh93u+vm/mksh-era features (`typeset -A` is used, e.g. `zfs-tests.sh:210+` bash and associative arrays in helpers) | **medium** — validate ksh93u+m vs ast ksh with the suite on the VM route |
 | 4.14 | `perf` outside `/usr` (`commands.cfg:158`) | nixpkgs has `perf` (verified, and installed on the probe host at sw/bin) — covered by 4.1 farm | folded into 4.1 |
-| 4.15 | package availability | every allow-listed tool maps to a nixpkgs 26.05 package (verified via search.nixos.org for: ksh fio pamtester xxhash pax bc parted sysstat e2fsprogs xfsprogs samba lsscsi nfs-utils cryptsetup shadow acl attr libaio util-linux(→hostid, verified on host) perf iputils) | **none** — availability itself is not the problem |
+| 4.15 | package availability | every allow-listed tool maps to a nixpkgs 26.05 package (verified via search.nixos.org for: ksh fio pamtester xxhash pax bc parted sysstat e2fsprogs xfsprogs samba lsscsi nfs-utils (2.9.1 on release-26.05) cryptsetup shadow acl attr libaio util-linux coreutils(→`hostid` is a coreutils applet on NixOS, verified at `sw/bin/hostid`) perf iputils) | **none** — availability itself is not the problem |
+| 4.16 | absolute-path execs into `/usr/sbin` and `/bin`: `wipefs`, `nologin`, `/bin/true` (§1.4) | the 4.1 farm plan covered only `/usr/bin` + `/sbin`; `/usr/sbin` does not exist, `/bin` only `sh`/`env` | **high** — extend the farm to `/usr/sbin` and add `/bin/true` |
+| 4.17 | runner-internal absolute execs `/usr/bin/awk`, `/usr/bin/strace` plus `top`/`killall` under the constrained PATH (§1.4) (`test-runner.py.in:205-227`) | strace/top/killall must additionally be installed (CI installs `strace`, `procps`, `psmisc`) and land inside the farm or the real `/usr/bin` | **medium** — VM package set + farm entries |
 
 Kernel-side summary: the nixpkgs x86_64 kernel as shipped in 26.05 satisfies
 the scsi_debug, loop (≥8 units, `loop-control`), io_uring, zlib, and
@@ -262,12 +283,13 @@ The ZFS kmod itself is already proven on this kernel (running here).
 
 ## 5. Upstream CI as the reference environment
 
-`.github/workflows/zfs-qemu.yml`: matrix over 13 Linux distros (AlmaLinux 8-10,
-CentOS Stream 9/10, Debian 12-13, Fedora 43/44, Ubuntu 22/24/26, Alpine 3.24,
-archlinux, tumbleweed) + FreeBSD 14-16, in QEMU/KVM VMs on `ubuntu-24.04`
-runners; PR CI splits tags across 2 VMs (`-T N/M`, `zfs-tests.sh:269-380`
-`split_tags`). Quick CI type runs `sanity.run` only (`zfs-qemu.yml:59-61`,
-`qemu-6-tests.sh:181-183`).
+`.github/workflows/zfs-qemu.yml`: matrix over Linux distros + FreeBSD 14-16,
+in QEMU/KVM VMs on `ubuntu-24.04` runners. The default matrix has 15 Linux
+entries (incl. Alpine 3.24); the `ci_type=linux` case narrows to 13 (adds
+Debian 11, drops Alpine); `archlinux` and `tumbleweed` appear only in
+commented-out entries. PR CI splits tags across 2 VMs (`-T N/M`,
+`zfs-tests.sh:269-380` `split_tags`). Quick CI type runs `sanity.run` only
+(`zfs-qemu.yml:59-61`, `qemu-6-tests.sh:181-183`).
 
 - Dependencies per distro (`qemu-3-deps-vm.sh`): e.g. RHEL family installs
   `acl attr bc cryptsetup fio jq ksh lsscsi nfs-utils pamtester parted perf
@@ -297,12 +319,15 @@ runners; PR CI splits tags across 2 VMs (`-T N/M`, `zfs-tests.sh:269-380`
 
 The nixpkgs-VM route is credible: kernel requirements are met by the stock
 nixpkgs kernel, and every required binary is packaged. The work is
-FHS-shimming: (1) an activation-time symlink farm for the §1 allow-list under
-`/usr/bin` + `/sbin` (including `/bin/ksh` and the two `mkfs.ext4` aliases —
-this single step clears 4.1, 4.2, 4.3, 4.14), (2) the `xxh128sum` alias
-(4.5), (3) enabling nfs-server + samba usershares and the zfs rules already
-shipped by nixpkgs (4.6, 4.7), (4) validating `sudo -E`/PATH semantics in the
-generated sudoers (4.9). Expected skips: kmemleak (`-m`), `/boot/config-*`
-io_uring probes (4.8, 4.10). Everything else is parity with the distros CI
-already tests; note CI itself *only ever runs ZTS on FHS distros*, so this
-would be genuinely new territory for the project.
+FHS-shimming: (1) an activation-time symlink farm for the §1 allow-list **and
+the §1.4 absolute-path execs** under `/usr/bin`, `/usr/sbin`, `/bin` and
+`/sbin` (incl. `/bin/ksh`, `/bin/true`, `wipefs`, `nologin`, and the
+`fsck.ext4`/`mkfs.ext4`/gzip aliases — this step clears 4.1–4.3, 4.14 and
+4.16), (2) the `xxh128sum` alias (4.5), (3) `strace`, `top` and `killall` in
+the VM package set so the runner's timeout-debug path works (4.17), (4)
+enabling nfs-server + samba usershares and the zfs rules already shipped by
+nixpkgs (4.6, 4.7), (5) validating `sudo -E`/PATH semantics in the generated
+sudoers (4.9). Expected skips: kmemleak (`-m`), `/boot/config-*` io_uring
+probes (4.8, 4.10). Everything else is parity with the distros CI already
+tests; note CI itself *only ever runs ZTS on FHS distros*, so this would be
+genuinely new territory for the project.
