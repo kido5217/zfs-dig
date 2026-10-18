@@ -65,6 +65,31 @@ zfs_scratch_dir=$(mktemp -d /var/tmp/zfs-zloop.XXXXXX) || exit 1
   When transferring sources, include working-tree edits: `git archive HEAD`
   omits them.
 
+### Nix development environment (flake.nix)
+
+Use the flake dev env for every build and test; it pins nixpkgs 26.05 and
+the VM kernel. Do not build outside `nix develop` or load modules on the
+host — kernel-tier tests run only inside the test VM (live pools here).
+
+```sh
+nix develop                    # then: ./autogen.sh && ./configure --with-config=user && make
+nix flake check                # unit tier + VM smoke (~minutes)
+nix build .#zfs-tests          # ZTS driver bundle, then: ./result/bin/zfs-tests-driver
+nix run .#zts-debug            # driver with --interactive debug shell
+nix flake update               # the one bump point; also bump META-aware code paths
+```
+
+- The flake.lock pin is the single version authority: kernel, dependencies
+  and the ZTS VM all follow it. If the default kernel ever exceeds the
+  META `Linux-Maximum`, pin explicitly in `flake.nix` (see docs/wayfinder/
+  notes in map issue #2).
+- `checks.unit` covers configure→make→check (incl. ztest); `make unit` and
+  `zloop.sh` stay interactive in the dev shell against the same tree.
+- ZFS tools inside the suite VM live on the FHS farm (`nix/vm.nix`); if a
+  ZTS test fails with "no such file or directory" on a `/bin`, `/sbin`,
+  `/usr/bin` or `/usr/sbin` path, extend `fhsFarm` — that is the seam.
+- Details and rationale: `MANIFEST.md` → wayfinder map issue #2.
+
 ## Compatibility
 
 - Preserve imports of older pools and tolerate absent new data. If a format
