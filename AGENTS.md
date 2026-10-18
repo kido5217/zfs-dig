@@ -127,3 +127,28 @@ zfs_scratch_dir=$(mktemp -d /var/tmp/zfs-zloop.XXXXXX) || exit 1
   commit body when needed; follow `CONTRIBUTING.md` for override precedence.
 - Do not commit generated `configure`, `Makefile.in`, `zfs_config.h`, editor
   files or build output; `.abi` updates require the review described above.
+
+## Git workflow
+
+`master` is protected: changes land on it only through a merged PR. The agent runs the whole cycle itself, squash-merge included:
+
+1. Branch from `master`, commit, push.
+2. Open the PR.
+3. Squash-merge it.
+4. Check out `master`, `git pull --rebase`, delete the branch.
+
+Done when local `master` carries the merged change and the branch is gone.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues on `kido5217/zfs-dig`, driven with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.
