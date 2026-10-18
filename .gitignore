@@ -19,6 +19,10 @@
 !contrib
 !docs
 !etc
+!nix
+!flake.lock
+!flake.nix
+!MANIFEST.md
 !include
 !lib
 !man
@@ -34,6 +38,8 @@
 !contrib/**
 !docs/**
 !etc/**
+!nix/**
+!MANIFEST.md
 !include/**
 !lib/**
 !man/**
