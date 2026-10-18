@@ -19,7 +19,7 @@ nixpkgs attributes:
     autoconf automake libtool gnumake m4 pkg-config
     perl git gnutar gawk gnused gnugrep coreutils findutils diffutils
     zlib libuuid libtirpc openssl
-    stdenv.cc   # gcc + binutils (as/ld; objdump is invoked by zstdcheck)
+    stdenv.cc   # gcc + binutils (as/ld; libtool also probes objdump — see §4.2)
 
 `libuuid` in 26.05 resolves to `util-linux-minimal`, which also ships the
 libblkid development files — that is why the nixpkgs expression lists only
@@ -41,7 +41,7 @@ optional for this tree's configure — see §2/§3.
 | `libaio` | builds `mmap_libaio` ZTS helper (`config/user-libaio.m4:6`, `config/zfs-build.m4:369`) |
 | `libunwind` | better ASSERT backtraces (`config/user-libunwind.m4:15-59`) |
 | `attr` | not linked anywhere in the build (no `-lattr`); its `getfattr`/`setfacl` binaries are ZTS *runtime* needs (§4) |
-| `python3` | soft (`config/always-python.m4:16`, falls back to `:`); without it pyzfs, `zarcstat`/`dbufstat`/`zilstat`/`zarcsummary` and the whole ZTS runner are silently dropped (`cmd/Makefile.am:98`, `config/always-pyzfs.m4:41-46`) |
+| `python3` | soft (`config/always-python.m4:16`, falls back to `:`); without it pyzfs and `zarcstat`/`dbufstat`/`zilstat`/`zarcsummary` are silently dropped (`cmd/Makefile.am:98`, `config/always-pyzfs.m4:41-46`); the ZTS runner is *installed unconditionally* (`tests/Makefile.am:14-17`, `PYTHON_SHEBANG` hardcoded `python3` at `config/always-python.m4:42`) and fails at runtime instead (§4.9) |
 | pyzfs extras | `packaging` or `distlib`, `setuptools`, `cffi`, python dev headers (`config/always-pyzfs.m4:63-118`) ⇒ `python3`, `python3Packages.setuptools`, `python3Packages.cffi`, `python3Packages.packaging` |
 | `linux-headers` | `user-libblkid.m4:7-9`/`user-statx.m4` etc. read glibc/kernel headers — satisfied by stdenv, listed for completeness |
 
@@ -63,7 +63,7 @@ optional for this tree's configure — see §2/§3.
 | `gcc`/clang + binutils | `configure.ac:41` `AC_PROG_CC`, `:46` `AX_PTHREAD`, `:44` `AM_PROG_AS`; SIMD/CFI link probes (`config/always-compiler-options.m4`, `toolchain-*.m4`) | configure + make |
 | `perl` | root `Makefile.am:130,125` → `scripts/cstyle.pl`, `scripts/spdxcheck.pl`; `tests/unit/Makefile.am:178` → `scripts/coverage_report.pl` | `make checkstyle`, `unit-coverage` — **not probed by configure** |
 | `git` | root `Makefile.am:119,159`; `scripts/commitcheck.sh`; `scripts/make_gitrev.sh:49-50`; `config/zfs-meta.m4:74-89` | build + checkstyle; degrades silently when missing (§4.3) |
-| `objdump` | `module/Makefile.in:189-190` (`check-zstd-symbols`) via root `Makefile.am:164-166` | `make checkstyle` |
+| `objdump` | probed by libtool under `LT_INIT` (`AC_CHECK_TOOL`); `zstdcheck` (`module/Makefile.in:189-190`) is vacuous in a user-only build — the `module/zstd` objects it inspects are never built and the pipeline status comes from awk | not load-bearing for this tier |
 | `gdb` | `scripts/zloop.sh:31,115,157-169` | zloop crash path only |
 | lcov/genhtml | `tests/unit/Makefile.am:165-186`; probe `config/ax_code_coverage.m4:115-116` | `make unit-coverage` (+ `--enable-code-coverage`) |
 | `shellcheck`/`checkbashisms` | `config/always-shellcheck.m4:6-7`; `config/Shellcheck.am:26,44` | codecheck; **skipped when absent** |
@@ -81,20 +81,27 @@ optional for this tree's configure — see §2/§3.
    `spdxcheck.pl`, `coverage_report.pl`; no macro checks for perl in the
    user path (`perl` is only injected for kernel configs,
    `generic.nix` `optionals buildKernel`). Breakage lands at check time.
-2. **objdump (binutils)** — `zstdcheck` is unconditionally in `CHECKS`
-   (root `Makefile.am:164-166` → `module/Makefile.in:189`); nothing in
-   configure asks for it.
-3. **git silent degradation** — no git ⇒ `make_gitrev.sh:50` yields
-   `"unknown"`, `commitcheck`/`vcscheck` skip themselves
-   (`Makefile.am:119,159`), `config/zfs-meta.m4:74` leaves the release
-   string at the META value. Everything "passes" with wrong build
-   metadata; only `vcscheck` silently stops catching untracked files.
+2. **objdump — non-issue after review** — `zstdcheck` is unconditionally
+   in `CHECKS` (root `Makefile.am:164-166` → `module/Makefile.in:189`),
+   and libtool does probe objdump (`AC_CHECK_TOOL` under `LT_INIT`).
+   But in a user-only build the `module/zstd/lib/**/*.o` files it inspects
+   never exist and the pipeline's status comes from awk, so zstdcheck
+   passes vacuously even with `OBJDUMP=false` (verified directly). Not
+   load-bearing for this tier.
+3. **git silent degradation** — no git ⇒ `make_gitrev.sh:67` yields
+   `"unknown"` (the silenced `git describe` is at `:50`), `commitcheck`/
+   `vcscheck` skip themselves (`Makefile.am:119,159`),
+   `config/zfs-meta.m4:74` leaves the release string at the META value.
+   Everything "passes" with wrong build metadata; only `vcscheck` silently
+   stops catching untracked files.
 4. **gdb + libtool at test time** — zloop only invokes gdb on a crash
    (`zloop.sh:31`), and in-tree the generated `scripts/common.sh` overrides
    it to `libtool --mode=execute gdb` (`scripts/Makefile.am:41`), so
    libtool must stay on PATH when zloop reports a core.
-5. **procps `uptime`** — `zloop.sh:388` runs unconditionally at exit; a
-   zloop session that built clean dies on the last line without procps.
+5. **procps `uptime`** — `zloop.sh:388` runs unconditionally at exit, but
+   the following `if` (false when no crashes) swallows its failure: without
+   procps zloop exits **0** and only leaves a broken `ztest.out` tail —
+   silent success, not a hard death (verified by simulating the tail).
 6. **writable `/proc/sys/kernel/core_pattern`** — `zloop.sh:80-97` sets
    and restores it; unprivileged runs only warn and skip core capture
    (AGENTS.md documents the side effect).
@@ -123,22 +130,38 @@ optional for this tree's configure — see §2/§3.
     runs `zfs-tests.sh -c` **during the build**, under bash!) and test
     failures later: `bc jq fio cpio pax rsync scp ssh openssl attr
     pamtester cryptsetup parted perf udevadm useradd/groupadd (shadow)
-    hostid blkid/disk-related util-linux tools`, Linux set incl.
-    `smartmontools`/`sysstat` for zpool.d zedlets (nixpkgs patches exactly
-    this PATH with `coreutils gawk gnused gnugrep util-linux smartmontools
-    sysstat` in `generic.nix` postFixup, plus `nfs-utils` for exportfs).
+    hostid blkid/disk-related util-linux tools`; the Linux-only set
+    (§1.2 of the ZTS inventory, #4) additionally needs `mkfs.xfs`
+    (xfsprogs), `modprobe`/`lsmod` (kmod), `lsscsi`, `pamtester`, `perf`.
+    `smartmontools` is *not* on the allow-list — it belongs to the
+    zpool.d/zedlet PATH that nixpkgs patches with `coreutils gawk gnused
+    gnugrep util-linux smartmontools sysstat` in `generic.nix` postFixup
+    (sysstat *is* allow-listed; `nfs-utils` provides `exportfs`).
 12. **bash** — zloop/zfs-tests are `#!/usr/bin/env bash`
     (`scripts/zloop.sh:1`), but no configure check for bash exists in the
-    user path; `make` itself already trips on it via `scripts/Makefile.am:84`.
+    user path; during `make`, `scripts/Makefile.am:84` prints
+    `/usr/bin/env: 'bash'…` and continues (the recipe line is `-`-prefixed,
+    so the error is ignored — the breakage surfaces later at ZTS runtime).
 
 ## 5. Dev-shell summary for this tier
 
+The list below is a **devShell `buildInputs` set**, not a runnable
+one-liner: `nix shell` executes no setup hooks, so with bare outputs
+`autogen.sh` fails (autoreconf can't see libtool's macros → "not using
+Libtool" → `LIBTOOL undefined`) and `configure` dies at
+`*** zlib-devel package required` — split-output packages need their
+`.dev`/`.lib` variants plus exported `PKG_CONFIG_PATH`/`C_INCLUDE_PATH`/
+`LIBRARY_PATH`, and a compiler (`stdenv.cc`) is not in the list. In a
+flake `devShell` these come from `autoreconfHook`-style setup hooks (as
+nixpkgs itself uses); ad-hoc, prefer `nix shell nixpkgs#stdenv.cc … -c
+bash` **with** the dev outputs and exported paths.
+
 ```
-nix shell nixpkgs#{autoconf,automake,libtool,gnumake,m4,pkg-config,perl,git} \
-          nixpkgs#{gnutar,gawk,gnused,gnugrep,coreutils,findutils,diffutils} \
-          nixpkgs#{zlib,libuuid,libtirpc,openssl} -c bash
-# + nixpkgs#{curl,systemd,pam,attr} to mirror nixpkgs' own feature set
-# + nixpkgs#{shellcheck,checkbashisms,cppcheck,mandoc,pax-utils,python3Packages.flake8,parallel,lcov} for checkstyle/lint/unit-coverage
-# + nixpkgs#{gdb,procps} for zloop.sh
-# + nixpkgs#{ksh,python3,util-linux,lvm2,e2fsprogs,sudo,bc,jq,fio,cpio,pax,shadow,cryptsetup,parted,libcap,openssh,nfs-utils,smartmontools,sysstat} for full ZTS
+autoconf automake libtool gnumake m4 pkg-config
+perl git gnutar gawk gnused gnugrep coreutils findutils diffutils
+zlib libuuid libtirpc openssl stdenv.cc
+# + curl systemd pam attr to mirror nixpkgs' own feature set
+# + shellcheck checkbashisms cppcheck mandoc pax-utils python3Packages.flake8 parallel lcov for checkstyle/lint/unit-coverage
+# + gdb procps for zloop.sh
+# + ksh python3 python3Packages.{setuptools,cffi,packaging} util-linux lvm2 e2fsprogs xfsprogs kmod lsscsi sudo bc jq fio cpio pax shadow attr pamtester cryptsetup parted perf libcap openssh nfs-utils sysstat libaio for full ZTS
 ```
